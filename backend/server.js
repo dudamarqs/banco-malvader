@@ -1,285 +1,213 @@
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto'); // Módulo nativo do Node.js para criptografia
-const pool = require('./src/utils/database'); // Para controle de transações
+const crypto = require('crypto'); // Módulo para criptografia
 
-// DAOs que serão usados (assumindo que foram corrigidos como na resposta anterior)
+// DAOs - Certifique-se de que a importação do 'pool' dentro deles está correta
+// DE: const { pool } = require(...) PARA: const pool = require(...)
 const UserDAO = require('./src/dao/UserDAO');
 const AccountDAO = require('./src/dao/AccountDAO');
 const TransactionDAO = require('./src/dao/TransactionDAO');
 const EmployeeDAO = require('./src/dao/EmployeeDAO');
 const ReportDAO = require('./src/dao/ReportDAO');
+const { logAction } = require('./src/utils/audit');
 
 const app = express();
-// É recomendado usar uma porta diferente da do frontend React (que usa 3000 por padrão)
-const port = 3001; 
+const PORT = 3001; // Porta padrão para o backend
 
 app.use(cors());
 app.use(express.json());
 
-const recordAudit = async (userId, action, details) => { /* ... sua função de auditoria ... */ };
+// --- ROTAS DE AUTENTICAÇÃO ---
 
-// =======================================================
-// ==              ROTAS DE AUTENTICAÇÃO                ==
-// =======================================================
-
-// ETAPA 1: Login com Senha
+// Rota de Login
 app.post('/api/auth/login', async (req, res) => {
-    const { username: cpf, password } = req.body;
+    const { cpf, password } = req.body;
+    if (!cpf || !password) {
+        return res.status(400).json({ message: 'CPF e senha são obrigatórios.' });
+    }
+
     try {
         const user = await UserDAO.findByCpf(cpf);
-        if (user) {
-            const passwordHash = crypto.createHash('md5').update(password).digest('hex');
-            if (user.senha_hash === passwordHash) {
-                // Senha correta! Agora, gere e salve o OTP.
-                await pool.query('CALL gerar_otp(?, @novo_otp)', [user.id_usuario]);
-                const [[otpResult]] = await pool.query('SELECT @novo_otp AS otp');
-
-                console.log(`OTP gerado para ${cpf}: ${otpResult.otp}`); // Log para testes!
-
-                // MUDANÇA: Em vez de dar acesso, sinalize que o OTP é necessário
-                res.json({ success: true, otpRequired: true, message: 'Validação de senha bem-sucedida. Por favor, insira o OTP.' });
-            } else {
-                res.status(401).json({ success: false, message: 'Usuário ou senha inválidos' });
-            }
-        } else {
-            res.status(401).json({ success: false, message: 'Usuário ou senha inválidos' });
+        if (!user) {
+            return res.status(404).json({ message: 'Usuário não encontrado.' });
         }
+
+        // Criptografa a senha fornecida para comparar com a do banco
+        const passwordHash = crypto.createHash('md5').update(password).digest('hex');
+
+        if (user.senha_hash !== passwordHash) {
+            return res.status(401).json({ message: 'Senha inválida.' });
+        }
+        
+        // Gera OTP (a procedure no banco foi corrigida)
+        await UserDAO.generateOtp(user.id_usuario);
+        logAction(user.id_usuario, 'LOGIN_SUCCESS', `Usuário ${user.nome} logado com sucesso.`);
+
+        // Retorna dados essenciais para o frontend
+        res.json({ 
+            message: 'Login bem-sucedido. Valide o OTP.',
+            user: {
+                id_usuario: user.id_usuario,
+                nome: user.nome,
+                tipo_usuario: user.tipo_usuario
+            } 
+        });
     } catch (error) {
         console.error('Erro no login:', error);
-        res.status(500).json({ success: false, message: 'Erro interno do servidor' });
+        res.status(500).json({ message: 'Erro interno no servidor.' });
     }
 });
 
-// ETAPA 2: Nova Rota para Validar o OTP
+// Rota de Validação de OTP
 app.post('/api/auth/validate-otp', async (req, res) => {
-    const { cpf, otp } = req.body;
+    const { id_usuario, otp } = req.body;
     try {
-        const user = await UserDAO.validateAndClearOtp(cpf, otp);
-
-        if (user) {
-            // OTP Correto! Agora sim, damos acesso ao usuário
-            await recordAudit(user.id_usuario, 'login_otp_sucesso', `Login com OTP bem-sucedido para CPF ${cpf}`);
-            res.json({
-                success: true,
-                message: 'OTP validado com sucesso!',
-                // Enviamos os dados do usuário para o frontend montar o dashboard
-                user: {
-                    userType: user.tipo_usuario
-                    // você pode adicionar outros dados do usuário aqui se precisar
-                }
-            });
+        const user = await UserDAO.findById(id_usuario);
+        // Lógica de validação do OTP
+        if (user && user.otp_ativo === otp && new Date(user.otp_expiracao) > new Date()) {
+            await UserDAO.clearOtp(id_usuario); // Limpa o OTP após o uso
+            res.json({ message: 'OTP validado com sucesso.', user });
         } else {
-            // OTP incorreto ou expirado
-            await recordAudit(null, 'login_otp_falha', `Tentativa de OTP inválido para CPF ${cpf}`);
-            res.status(401).json({ success: false, message: 'OTP inválido ou expirado.' });
+            res.status(400).json({ message: 'OTP inválido ou expirado.' });
         }
     } catch (error) {
         console.error('Erro na validação do OTP:', error);
-        res.status(500).json({ success: false, message: 'Erro interno do servidor' });
+        res.status(500).json({ message: 'Erro interno no servidor.' });
     }
 });
 
+// --- ROTAS DE CLIENTE ---
 
-// =======================================================
-// ==                 ROTAS DE OPERAÇÕES BANCÁRIAS        ==
-// =======================================================
+// Rota para buscar contas de um cliente pelo id_usuario
+app.get('/api/client/accounts/:id_usuario', async (req, res) => {
+    try {
+        const accounts = await AccountDAO.findAccountsByUserId(req.params.id_usuario);
+        res.json(accounts);
+    } catch (error) {
+        console.error('Erro ao buscar contas:', error);
+        res.status(500).json({ message: 'Erro ao buscar contas.' });
+    }
+});
 
-// A lógica aqui muda: o backend apenas REGISTRA a transação. O TRIGGER no banco de dados ATUALIZA o saldo.
+// --- ROTAS DE CONTA ---
 
+// Rota para obter saldo
+app.get('/api/account/balance/:id_conta', async (req, res) => {
+    try {
+        const balance = await AccountDAO.getBalance(req.params.id_conta);
+        res.json({ balance });
+    } catch (error) {
+        res.status(500).json({ message: 'Erro ao obter saldo.' });
+    }
+});
+
+// Rota para obter extrato da conta
+app.get('/api/account/statement/:id_conta', async (req, res) => {
+    try {
+        const statement = await TransactionDAO.getStatement(req.params.id_conta);
+        res.json(statement);
+    } catch (error) {
+        console.error('Erro ao obter extrato:', error);
+        res.status(500).json({ message: 'Erro ao obter extrato.' });
+    }
+});
+
+// Rota para Depósito
 app.post('/api/account/deposit', async (req, res) => {
-    const { numero_conta, valor } = req.body;
+    const { id_conta, valor } = req.body;
     try {
-        const account = await AccountDAO.getAccountByNumber(numero_conta);
-        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
-        
-        // Apenas registra a transação. O gatilho 'atualizar_saldo' fará a soma no saldo.
+        // CORREÇÃO: Passando um objeto para recordTransaction
         await TransactionDAO.recordTransaction({
-            id_conta_origem: account.id_conta,
+            id_conta_origem: id_conta,
             tipo_transacao: 'DEPOSITO',
-            valor: valor,
-            descricao: 'Depósito em conta'
+            valor,
+            descricao: 'Depósito em terminal'
         });
-        
-        await recordAudit(account.id_cliente, 'deposito', `Depósito de R$${valor} na conta ${numero_conta}`);
-        res.json({ success: true, message: 'Depósito recebido com sucesso!' });
+        const newBalance = await AccountDAO.getBalance(id_conta);
+        res.json({ message: 'Depósito realizado com sucesso!', newBalance });
     } catch (error) {
-        console.error('Erro no depósito:', error);
-        res.status(500).json({ success: false, message: error.message || 'Erro ao processar o depósito' });
+        console.error(error);
+        res.status(500).json({ message: error.message || 'Falha no depósito.' });
     }
 });
 
+// Rota para Saque
 app.post('/api/account/withdraw', async (req, res) => {
-    const { numero_conta, valor } = req.body;
+    const { id_conta, valor } = req.body;
     try {
-        const account = await AccountDAO.getAccountByNumber(numero_conta);
-        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
-        if (parseFloat(account.saldo) < parseFloat(valor)) {
-            return res.status(400).json({ success: false, message: 'Saldo insuficiente.' });
-        }
-
-        // Apenas registra a transação. O gatilho 'atualizar_saldo' fará a subtração no saldo.
+        // CORREÇÃO: Passando um objeto para recordTransaction
         await TransactionDAO.recordTransaction({
-            id_conta_origem: account.id_conta,
+            id_conta_origem: id_conta,
             tipo_transacao: 'SAQUE',
-            valor: valor,
-            descricao: 'Saque em conta'
+            valor,
+            descricao: 'Saque em terminal'
         });
-
-        await recordAudit(account.id_cliente, 'saque', `Saque de R$${valor} da conta ${numero_conta}`);
-        res.json({ success: true, message: 'Saque realizado com sucesso!' });
+        const newBalance = await AccountDAO.getBalance(id_conta);
+        res.json({ message: 'Saque realizado com sucesso!', newBalance });
     } catch (error) {
-        console.error('Erro no saque:', error);
-        res.status(500).json({ success: false, message: error.message || 'Erro ao processar o saque' });
+        console.error(error);
+        res.status(500).json({ message: error.message || 'Falha no saque.' });
     }
 });
 
+// Rota para Transferência
 app.post('/api/account/transfer', async (req, res) => {
-    const { numero_conta_origem, numero_conta_destino, valor } = req.body;
+    const { id_conta_origem, numero_conta_destino, valor } = req.body;
     try {
-        const contaOrigem = await AccountDAO.getAccountByNumber(numero_conta_origem);
-        const contaDestino = await AccountDAO.getAccountByNumber(numero_conta_destino);
-        if (!contaOrigem || !contaDestino) return res.status(404).json({ success: false, message: 'Conta de origem ou destino não encontrada.' });
-        if (parseFloat(contaOrigem.saldo) < parseFloat(valor)) return res.status(400).json({ success: false, message: 'Saldo insuficiente' });
-
-        // Apenas registra a transação. O gatilho 'atualizar_saldo' fará a subtração na origem e a soma no destino.
+        const contaDestino = await AccountDAO.findByAccountNumber(numero_conta_destino);
+        if (!contaDestino) {
+            return res.status(404).json({ message: 'Conta de destino não encontrada.' });
+        }
+        
+        // CORREÇÃO: Passando um objeto para recordTransaction
         await TransactionDAO.recordTransaction({
-            id_conta_origem: contaOrigem.id_conta,
+            id_conta_origem,
             id_conta_destino: contaDestino.id_conta,
             tipo_transacao: 'TRANSFERENCIA',
-            valor: valor,
-            descricao: `Transferência para conta ${numero_conta_destino}`
+            valor,
+            descricao: `Transferência para ${contaDestino.numero_conta}`
         });
 
-        res.json({ success: true, message: 'Transferência realizada com sucesso!' });
+        const newBalance = await AccountDAO.getBalance(id_conta_origem);
+        res.json({ message: 'Transferência realizada com sucesso!', newBalance });
     } catch (error) {
-        console.error('Erro na transferência:', error);
-        res.status(500).json({ success: false, message: error.message || 'Erro ao processar a transferência.' });
+        console.error(error);
+        res.status(500).json({ message: error.message || 'Falha na transferência.' });
     }
 });
 
-// As rotas de consulta não precisam de grandes alterações
-app.get('/api/account/balance/:numero_conta', async (req, res) => {
+
+// --- ROTAS DE FUNCIONÁRIO ---
+
+// Rota para buscar todos os clientes
+app.get('/api/employees/clients', async (req, res) => {
     try {
-        const account = await AccountDAO.getAccountByNumber(req.params.numero_conta);
-        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
-        res.json({ success: true, saldo: account.saldo });
+        const clients = await EmployeeDAO.findAllClients();
+        res.json(clients);
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Erro ao consultar saldo.' });
+        res.status(500).json({ message: 'Erro ao buscar clientes.' });
     }
 });
 
-app.get('/api/account/statement/:numero_conta', async (req, res) => {
+// Rota para criar um novo cliente
+app.post('/api/employees/client', async (req, res) => {
+    const { nome, cpf, data_nascimento, telefone, password } = req.body;
+    
+    // CORREÇÃO DE SEGURANÇA: Criptografando a senha antes de salvar
+    const senha_hash = crypto.createHash('md5').update(password).digest('hex');
+
     try {
-        const account = await AccountDAO.getAccountByNumber(req.params.numero_conta);
-        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
-        const statement = await TransactionDAO.getTransactionsByAccountId(account.id_conta);
-        res.json({ success: true, statement });
+        // Passa os dados para o DAO, incluindo o hash da senha
+        const newClient = await EmployeeDAO.createClient({ nome, cpf, data_nascimento, telefone, senha_hash });
+        logAction(null, 'CREATE_CLIENT', `Cliente ${nome} criado.`);
+        res.status(201).json({ message: 'Cliente criado com sucesso!', client: newClient });
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Erro ao consultar extrato.' });
-    }
-});
-
-// =======================================================
-// ==              ROTAS DE FUNCIONÁRIO                 ==
-// =======================================================
-
-// ... (rotas de CRUD de clientes que fizemos na Tarefa 1) ...
-
-// Rota para buscar as contas de um cliente específico
-app.get('/api/employee/clients/:clientId/accounts', async (req, res) => {
-    const { clientId } = req.params;
-    try {
-        const accounts = await AccountDAO.getAccountsByClientId(clientId);
-        res.json({ success: true, accounts });
-    } catch (error) {
-        console.error('Erro ao buscar contas do cliente:', error);
-        res.status(500).json({ success: false, message: 'Erro ao buscar contas.' });
-    }
-});
-
-// Rota para criar uma nova conta para um cliente
-app.post('/api/employee/clients/:clientId/accounts', async (req, res) => {
-    const { clientId } = req.params;
-    const { tipo_conta, id_agencia = 1 } = req.body; // id_agencia fixo por simplicidade
-    try {
-        const accountId = await AccountDAO.createAccount({ id_cliente: clientId, id_agencia, tipo_conta });
-        await recordAudit(null, 'criacao_conta', `Funcionário abriu a conta ${accountId} para o cliente ${clientId}`);
-        res.json({ success: true, message: 'Conta criada com sucesso!', accountId });
-    } catch (error) {
-        console.error('Erro ao criar conta:', error);
-        res.status(500).json({ success: false, message: 'Erro ao criar conta.' });
-    }
-});
-
-// Rota para atualizar o status de uma conta
-app.put('/api/employee/accounts/:accountId/status', async (req, res) => {
-    const { accountId } = req.params;
-    const { status } = req.body; // Espera 'ATIVA' ou 'BLOQUEADA'
-    try {
-        const affectedRows = await AccountDAO.updateAccountStatus(accountId, status);
-        if (affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Conta não encontrada.' });
-        }
-        await recordAudit(null, 'status_conta', `Funcionário alterou status da conta ${accountId} para ${status}`);
-        res.json({ success: true, message: `Status da conta atualizado para ${status}.` });
-    } catch (error) {
-        console.error('Erro ao atualizar status da conta:', error);
-        res.status(500).json({ success: false, message: 'Erro ao atualizar status.' });
-    }
-});
-
-// Rota para deletar uma conta
-app.delete('/api/employee/accounts/:accountId', async (req, res) => {
-    const { accountId } = req.params;
-    try {
-        const affectedRows = await AccountDAO.deleteAccount(accountId);
-        if (affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Conta não encontrada.' });
-        }
-        await recordAudit(null, 'delecao_conta', `Funcionário deletou a conta ${accountId}`);
-        res.json({ success: true, message: 'Conta deletada com sucesso.' });
-    } catch (error) {
-        console.error('Erro ao deletar conta:', error);
-        res.status(400).json({ success: false, message: error.message || 'Erro ao deletar conta.' });
-    }
-});
-
-// Relatório de todas as contas com saldos e nomes dos clientes
-app.get('/api/reports/accounts-balances', async (req, res) => {
-    try {
-        const data = await ReportDAO.getAccountsWithBalances();
-        res.json({ success: true, data });
-    } catch (error) {
-        console.error('Erro ao gerar relatório de contas e saldos:', error);
-        res.status(500).json({ success: false, message: 'Erro ao gerar relatório.' });
-    }
-});
-
-// Relatório de clientes por agência
-app.get('/api/reports/clients-by-agency/:agencyId', async (req, res) => {
-    const { agencyId } = req.params;
-    try {
-        const data = await ReportDAO.getClientsByAgency(agencyId);
-        res.json({ success: true, data });
-    } catch (error) {
-        console.error('Erro ao gerar relatório de clientes por agência:', error);
-        res.status(500).json({ success: false, message: 'Erro ao gerar relatório.' });
-    }
-});
-
-// Relatório de logs de auditoria
-app.get('/api/reports/audit', async (req, res) => {
-    try {
-        const data = await ReportDAO.getAuditLogs();
-        res.json({ success: true, data });
-    } catch (error) {
-        console.error('Erro ao gerar relatório de auditoria:', error);
-        res.status(500).json({ success: false, message: 'Erro ao gerar relatório.' });
+        console.error('Erro ao criar cliente:', error);
+        res.status(500).json({ message: 'Erro ao criar cliente.' });
     }
 });
 
 
-app.listen(port, () => {
-    console.log(`Servidor do Banco Malvader rodando em http://localhost:${port}`);
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor do Banco Malvader rodando na porta ${PORT}`);
 });

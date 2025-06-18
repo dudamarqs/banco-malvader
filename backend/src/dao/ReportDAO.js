@@ -1,5 +1,5 @@
 // backend/src/dao/ReportDAO.js
-const { pool } = require('../utils/database');
+const pool = require('../utils/database');
 
 class ReportDAO {
     async recordReport(id_funcionario, tipo_relatorio, conteudo) {

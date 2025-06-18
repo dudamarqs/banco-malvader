@@ -1,42 +1,51 @@
-const pool = require('../utils/database');
+const { pool } = require('../utils/database');
 
 class UserDAO {
-    // MUDANÇA: A função agora busca pelo CPF, que é o novo 'username'
-    static async findByCpf(cpf) {
-        const [rows] = await pool.query('SELECT * FROM usuario WHERE cpf = ?', [cpf]);
+    /**
+     * Busca um usuário pelo CPF.
+     * @param {string} cpf - O CPF do usuário.
+     * @returns {Promise<object|undefined>} O objeto do usuário ou undefined se não for encontrado.
+     */
+    async findByCpf(cpf) {
+        const [rows] = await pool.execute(
+            'SELECT * FROM usuario WHERE cpf = ?',
+            [cpf]
+        );
         return rows[0];
     }
 
-    // Função para criar usuário (usada pelo funcionário ao criar cliente)
-    static async createUser(userData, connection = pool) {
-        const { nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash } = userData;
-        const query = 'INSERT INTO usuario (nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash) VALUES (?, ?, ?, ?, ?, ?)';
-        const [result] = await connection.query(query, [nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash]);
-        return result.insertId;
+    /**
+     * Busca um usuário pelo ID.
+     * @param {number} id - O ID do usuário.
+     * @returns {Promise<object|undefined>} O objeto do usuário ou undefined se não for encontrado.
+     */
+    async findById(id) {
+        const [rows] = await pool.execute(
+            'SELECT * FROM usuario WHERE id_usuario = ?',
+            [id]
+        );
+        return rows[0];
     }
 
-    // Dentro da classe UserDAO, adicione este método:
-    static async validateAndClearOtp(cpf, otp) {
-        const connection = await pool.getConnection();
-        try {
-            // Busca o usuário e verifica se o OTP é válido e não expirou
-            const [users] = await connection.query(
-                'SELECT * FROM usuario WHERE cpf = ? AND otp_ativo = ? AND otp_expiracao > NOW()',
-                [cpf, otp]
-            );
+    /**
+     * CRIAÇÃO: Função para chamar a procedure `gerar_otp` no banco de dados.
+     * Esta era a função que estava faltando e causava o erro no login.
+     * @param {number} id_usuario - O ID do usuário para o qual o OTP será gerado.
+     */
+    async generateOtp(id_usuario) {
+        // Executa a Stored Procedure que criamos no script SQL.
+        await pool.execute('CALL gerar_otp(?)', [id_usuario]);
+    }
 
-            if (users.length > 0) {
-                const user = users[0];
-                // Limpa o OTP para que não possa ser reutilizado
-                await connection.query('UPDATE usuario SET otp_ativo = NULL, otp_expiracao = NULL WHERE id_usuario = ?', [user.id_usuario]);
-                return user; // Retorna os dados do usuário em caso de sucesso
-            }
-
-            return null; // Retorna nulo se a validação falhar
-        } finally {
-            connection.release();
-        }
+    /**
+     * Limpa o OTP do usuário no banco de dados após uma validação bem-sucedida.
+     * @param {number} id_usuario - O ID do usuário a ter o OTP limpo.
+     */
+    async clearOtp(id_usuario) {
+        const query = 'UPDATE usuario SET otp_ativo = NULL, otp_expiracao = NULL WHERE id_usuario = ?';
+        await pool.execute(query, [id_usuario]);
     }
 }
 
-module.exports = UserDAO;
+// Exporta uma instância única da classe (Padrão Singleton)
+module.exports = new UserDAO();

@@ -1,15 +1,16 @@
 // backend/src/dao/TransactionDAO.js
-const { pool } = require('../utils/database');
+const pool = require('../utils/database');
 
 class TransactionDAO {
     // Método para registrar uma nova transação
-    async recordTransaction(id_conta_origem, id_conta_destino, tipo_transacao, valor, descricao) {
+    async recordTransaction(transactionData) {
+        const { id_conta_origem, id_conta_destino = null, tipo_transacao, valor, descricao } = transactionData;
         const query = `
             INSERT INTO transacao (id_conta_origem, id_conta_destino, tipo_transacao, valor, descricao)
             VALUES (?, ?, ?, ?, ?)
         `;
         const [result] = await pool.execute(query, [id_conta_origem, id_conta_destino, tipo_transacao, valor, descricao]);
-        return result.insertId; // Retorna o ID da transação recém-registrada
+        return result.insertId;
     }
 
     // Método para obter transações por conta
