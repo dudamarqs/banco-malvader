@@ -1,44 +1,42 @@
-// backend/src/dao/UserDAO.js
-const { pool } = require('../utils/database');
+const pool = require('../utils/database');
 
 class UserDAO {
-    // Método para criar um novo usuário
-    async createUser(nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash) {
-        const query = `
-            INSERT INTO usuario (nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `;
-        const [result] = await pool.execute(query, [nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash]);
-        return result.insertId; // Retorna o ID do usuário recém-criado
+    // MUDANÇA: A função agora busca pelo CPF, que é o novo 'username'
+    static async findByCpf(cpf) {
+        const [rows] = await pool.query('SELECT * FROM usuario WHERE cpf = ?', [cpf]);
+        return rows[0];
     }
 
-    // Método para ler usuário por ID
-    async getUserById(id_usuario) {
-        const query = 'SELECT * FROM usuario WHERE id_usuario = ?';
-        const [rows] = await pool.execute(query, [id_usuario]);
-        return rows[0]; // Retorna o primeiro usuário encontrado (ou undefined se não houver)
+    // Função para criar usuário (usada pelo funcionário ao criar cliente)
+    static async createUser(userData, connection = pool) {
+        const { nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash } = userData;
+        const query = 'INSERT INTO usuario (nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash) VALUES (?, ?, ?, ?, ?, ?)';
+        const [result] = await connection.query(query, [nome, cpf, data_nascimento, telefone, tipo_usuario, senha_hash]);
+        return result.insertId;
     }
 
-    // Método para ler usuário por CPF
-    async getUserByCpf(cpf) {
-        const query = 'SELECT * FROM usuario WHERE cpf = ?';
-        const [rows] = await pool.execute(query, [cpf]);
-        return rows[0]; // Retorna o primeiro usuário encontrado (ou undefined se não houver)
-    }
+    // Dentro da classe UserDAO, adicione este método:
+    static async validateAndClearOtp(cpf, otp) {
+        const connection = await pool.getConnection();
+        try {
+            // Busca o usuário e verifica se o OTP é válido e não expirou
+            const [users] = await connection.query(
+                'SELECT * FROM usuario WHERE cpf = ? AND otp_ativo = ? AND otp_expiracao > NOW()',
+                [cpf, otp]
+            );
 
-    // Método para atualizar informações do usuário
-    async updateUser(id_usuario, nome, telefone) {
-        const query = 'UPDATE usuario SET nome = ?, telefone = ? WHERE id_usuario = ?';
-        const [result] = await pool.execute(query, [nome, telefone, id_usuario]);
-        return result.affectedRows > 0; // Retorna true se a atualização foi bem-sucedida
-    }
+            if (users.length > 0) {
+                const user = users[0];
+                // Limpa o OTP para que não possa ser reutilizado
+                await connection.query('UPDATE usuario SET otp_ativo = NULL, otp_expiracao = NULL WHERE id_usuario = ?', [user.id_usuario]);
+                return user; // Retorna os dados do usuário em caso de sucesso
+            }
 
-    // Método para atualizar OTP
-    async updateOtp(id_usuario, otp_ativo, otp_expiracao) {
-        const query = 'UPDATE usuario SET otp_ativo = ?, otp_expiracao = ? WHERE id_usuario = ?';
-        const [result] = await pool.execute(query, [otp_ativo, otp_expiracao, id_usuario]);
-        return result.affectedRows > 0;
+            return null; // Retorna nulo se a validação falhar
+        } finally {
+            connection.release();
+        }
     }
 }
 
-module.exports = new UserDAO();
+module.exports = UserDAO;

@@ -29,3 +29,67 @@ button {
 button:hover {
     opacity: 0.9;
 }
+
+/* ... (seu CSS existente) ... */
+
+.message {
+  margin-top: 15px;
+  padding: 10px;
+  border-radius: 5px;
+  font-weight: bold;
+}
+
+.message.success {
+  color: #155724;
+  background-color: #d4edda;
+  border: 1px solid #c3e6cb;
+}
+
+.message.error {
+  color: #721c24;
+  background-color: #f8d7da;
+  border: 1px solid #f5c6cb;
+}
+
+.balance-display {
+    margin-top: 20px;
+    padding: 15px;
+    background-color: #f0f0f0;
+    border-left: 5px solid #007bff;
+}
+
+.balance-display h4 {
+    margin: 0;
+    color: #333;
+}
+
+/* ... (seu CSS existente) ... */
+
+.statement-container {
+    margin-top: 20px;
+}
+
+.statement-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+.statement-table th, .statement-table td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+
+.statement-table th {
+    background-color: #f2f2f2;
+    font-weight: bold;
+}
+
+.statement-table tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+.statement-table tr:hover {
+    background-color: #ddd;
+}

@@ -1,46 +1,40 @@
-// backend/src/dao/EmployeeDAO.js
-const { pool } = require('../utils/database');
+const pool = require('../utils/database');
 
 class EmployeeDAO {
-    async createEmployee(id_usuario, codigo_funcionario, cargo, id_supervisor) {
-        const query = `
-            INSERT INTO funcionario (id_usuario, codigo_funcionario, cargo, id_supervisor)
-            VALUES (?, ?, ?, ?)
-        `;
-        const [result] = await pool.execute(query, [id_usuario, codigo_funcionario, cargo, id_supervisor]);
+    // Método para criar um novo cliente
+    static async createClient(clientData, connection = pool) {
+        const { nome, cpf, endereco, telefone } = clientData;
+        const query = 'INSERT INTO cliente (nome, cpf, endereco, telefone) VALUES (?, ?, ?, ?)';
+        const [result] = await connection.query(query, [nome, cpf, endereco, telefone]);
         return result.insertId;
     }
 
-    async getEmployeeById(id_funcionario) {
-        const query = 'SELECT * FROM funcionario WHERE id_funcionario = ?';
-        const [rows] = await pool.execute(query, [id_funcionario]);
+    // Método para obter todos os clientes
+    static async getAllClients() {
+        const [rows] = await pool.query('SELECT * FROM cliente');
+        return rows;
+    }
+
+    // Método para obter um cliente por ID
+    static async getClientById(clientId) {
+        const [rows] = await pool.query('SELECT * FROM cliente WHERE id_cliente = ?', [clientId]);
         return rows[0];
     }
 
-    async getEmployeeByUserId(id_usuario) {
-        const query = 'SELECT * FROM funcionario WHERE id_usuario = ?';
-        const [rows] = await pool.execute(query, [id_usuario]);
-        return rows[0];
+    // Método para atualizar os dados de um cliente
+    static async updateClient(clientId, clientData) {
+        const { nome, endereco, telefone } = clientData; // CPF e email não devem ser alterados aqui
+        const query = 'UPDATE cliente SET nome = ?, endereco = ?, telefone = ? WHERE id_cliente = ?';
+        const [result] = await pool.query(query, [nome, endereco, telefone, clientId]);
+        return result.affectedRows;
     }
 
-    async updateEmployee(id_funcionario, cargo, telefone, endereco_id) {
-        // Assume que telefone e endereco são atualizados na tabela usuario/endereco
-        // Para esta task, focaremos em cargo.
-        const query = 'UPDATE funcionario SET cargo = ? WHERE id_funcionario = ?';
-        const [result] = await pool.execute(query, [cargo, id_funcionario]);
-        return result.affectedRows > 0;
-    }
-
-    [cite_start]// Método para obter número de funcionários por agência (para trigger RF2.5) [cite: 43, 99]
-    async countEmployeesByAgency(id_agencia) {
-        // Isso precisaria de uma junção com a tabela de endereços de funcionário ou uma nova coluna na tabela funcionario
-        // para id_agencia. Para simplicidade, vamos simular que o limite é global ou associado ao cargo.
-        // O requisito fala "limite de funcionários por agência". Se funcionario não tem id_agencia,
-        // precisamos de uma tabela intermediária ou adicionar a coluna.
-        // Para este MVP, não implementaremos a contagem exata por agência a menos que a estrutura de `funcionario`
-        // contenha `id_agencia`. Assumiremos uma validação de permissão.
-        return 0; // Placeholder
+    // Método para deletar um cliente
+    static async deleteClient(clientId) {
+        // Lembre-se que o banco de dados pode impedir a exclusão se houver contas associadas (foreign key constraint)
+        const [result] = await pool.query('DELETE FROM cliente WHERE id_cliente = ?', [clientId]);
+        return result.affectedRows;
     }
 }
 
-module.exports = new EmployeeDAO();
+module.exports = EmployeeDAO;

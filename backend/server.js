@@ -1,297 +1,285 @@
-// backend/server.js
 const express = require('express');
-const cors = require('cors'); // Para permitir requisições do frontend
-const crypto = require('crypto'); // Para MD5
-const { pool, connectToDatabase } = require('./src/utils/database');
+const cors = require('cors');
+const crypto = require('crypto'); // Módulo nativo do Node.js para criptografia
+const pool = require('./src/utils/database'); // Para controle de transações
+
+// DAOs que serão usados (assumindo que foram corrigidos como na resposta anterior)
 const UserDAO = require('./src/dao/UserDAO');
 const AccountDAO = require('./src/dao/AccountDAO');
 const TransactionDAO = require('./src/dao/TransactionDAO');
+const EmployeeDAO = require('./src/dao/EmployeeDAO');
+const ReportDAO = require('./src/dao/ReportDAO');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+// É recomendado usar uma porta diferente da do frontend React (que usa 3000 por padrão)
+const port = 3001; 
 
-// Middlewares
 app.use(cors());
-app.use(express.json()); // Para parsear o corpo das requisições como JSON
+app.use(express.json());
 
-// Conectar ao banco de dados ao iniciar o servidor
-connectToDatabase();
+const recordAudit = async (userId, action, details) => { /* ... sua função de auditoria ... */ };
 
-// Função auxiliar para gerar hash MD5 (conforme requisito de senha_hash)
-const generateMD5Hash = (text) => {
-    return crypto.createHash('md5').update(text).digest('hex');
-};
+// =======================================================
+// ==              ROTAS DE AUTENTICAÇÃO                ==
+// =======================================================
 
-// --- ROTAS DA API ---
-
-// Rota de Teste
-app.get('/', (req, res) => {
-    res.send('API do Banco Malvader funcionando!');
-});
-
-// Tarefa 3.1: Autenticação do Usuário
+// ETAPA 1: Login com Senha
 app.post('/api/auth/login', async (req, res) => {
-    const { cpf, senha, tipo_usuario } = req.body;
-    const acao = `LOGIN - ${tipo_usuario}`;
-    let id_usuario = null;
-
+    const { username: cpf, password } = req.body;
     try {
-        const user = await UserDAO.getUserByCpf(cpf);
+        const user = await UserDAO.findByCpf(cpf);
+        if (user) {
+            const passwordHash = crypto.createHash('md5').update(password).digest('hex');
+            if (user.senha_hash === passwordHash) {
+                // Senha correta! Agora, gere e salve o OTP.
+                await pool.query('CALL gerar_otp(?, @novo_otp)', [user.id_usuario]);
+                const [[otpResult]] = await pool.query('SELECT @novo_otp AS otp');
 
-        if (!user) {
-            // Usuário não encontrado
-            await pool.execute(
-                'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-                [null, acao, `Falha: Usuário com CPF ${cpf} não encontrado.`]
-            );
-            return res.status(401).json({ message: 'CPF ou senha inválidos.' });
-        }
+                console.log(`OTP gerado para ${cpf}: ${otpResult.otp}`); // Log para testes!
 
-        id_usuario = user.id_usuario;
-        const hashedPassword = generateMD5Hash(senha);
-
-        // Verificação básica de senha (sem OTP inicialmente, conforme a tarefa)
-        if (user.senha_hash !== hashedPassword) {
-            // Senha incorreta
-            await pool.execute(
-                'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-                [id_usuario, acao, 'Falha: Senha incorreta.']
-            );
-            [cite_start]// No futuro, implementar bloqueio após 3 tentativas [cite: 35]
-            return res.status(401).json({ message: 'CPF ou senha inválidos.' });
-        }
-
-        // Tipo de usuário deve corresponder
-        if (user.tipo_usuario !== tipo_usuario.toUpperCase()) {
-            await pool.execute(
-                'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-                [id_usuario, acao, `Falha: Tipo de usuário '${tipo_usuario}' não corresponde ao registrado.`]
-            );
-            return res.status(401).json({ message: 'Tipo de usuário incorreto para o CPF informado.' });
-        }
-
-        // Login bem-sucedido
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario, acao, 'Sucesso: Login realizado.']
-        );
-
-        res.status(200).json({
-            message: 'Login bem-sucedido!',
-            user: {
-                id_usuario: user.id_usuario,
-                nome: user.nome,
-                cpf: user.cpf,
-                tipo_usuario: user.tipo_usuario
+                // MUDANÇA: Em vez de dar acesso, sinalize que o OTP é necessário
+                res.json({ success: true, otpRequired: true, message: 'Validação de senha bem-sucedida. Por favor, insira o OTP.' });
+            } else {
+                res.status(401).json({ success: false, message: 'Usuário ou senha inválidos' });
             }
-        });
-
+        } else {
+            res.status(401).json({ success: false, message: 'Usuário ou senha inválidos' });
+        }
     } catch (error) {
         console.error('Erro no login:', error);
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario, acao, `Erro interno do servidor: ${error.message}`]
-        );
-        res.status(500).json({ message: 'Erro interno do servidor durante o login.' });
+        res.status(500).json({ success: false, message: 'Erro interno do servidor' });
     }
 });
 
-
-// Tarefa 3.2: Abertura de Conta (Menu de Funcionários - Simplificado)
-app.post('/api/account/open', async (req, res) => {
-    // Para simplificar, assumimos que o funcionário já está autenticado
-    // e seu id_usuario é passado na requisição (ou obtido de um token)
-    // Para esta fase, vamos simular que um funcionário (id_usuario = 1) está abrindo a conta.
-    const { id_cliente, tipo_conta, deposito_inicial } = req.body;
-    const id_funcionario_simulado = req.body.id_funcionario_logado || 1; // Usar um ID simulado para o funcionário
-
-    let numero_conta = '';
-    let accountId = null;
-
+// ETAPA 2: Nova Rota para Validar o OTP
+app.post('/api/auth/validate-otp', async (req, res) => {
+    const { cpf, otp } = req.body;
     try {
-        const cliente = await UserDAO.getUserById(id_cliente);
-        if (!cliente || cliente.tipo_usuario !== 'CLIENTE') {
-            return res.status(400).json({ message: 'Cliente inválido ou ID não corresponde a um cliente.' });
+        const user = await UserDAO.validateAndClearOtp(cpf, otp);
+
+        if (user) {
+            // OTP Correto! Agora sim, damos acesso ao usuário
+            await recordAudit(user.id_usuario, 'login_otp_sucesso', `Login com OTP bem-sucedido para CPF ${cpf}`);
+            res.json({
+                success: true,
+                message: 'OTP validado com sucesso!',
+                // Enviamos os dados do usuário para o frontend montar o dashboard
+                user: {
+                    userType: user.tipo_usuario
+                    // você pode adicionar outros dados do usuário aqui se precisar
+                }
+            });
+        } else {
+            // OTP incorreto ou expirado
+            await recordAudit(null, 'login_otp_falha', `Tentativa de OTP inválido para CPF ${cpf}`);
+            res.status(401).json({ success: false, message: 'OTP inválido ou expirado.' });
         }
-
-        [cite_start]// Gerar número da conta simplificado (sem dígito verificador complexo inicialmente) [cite: 37, 87]
-        // Ex: BANCO-MALVADER-XXXXX
-        numero_conta = `BM-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900) + 100}`;
-
-        accountId = await AccountDAO.openAccount(numero_conta, 1, deposito_inicial, tipo_conta.toUpperCase(), cliente.id_usuario); [cite_start]// id_agencia simulado como 1 [cite: 64]
-
-        [cite_start]// Registrar a abertura da conta na tabela de auditoria [cite: 37, 87]
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_funcionario_simulado, 'ABERTURA_CONTA', `Sucesso: Conta ${numero_conta} (${tipo_conta}) aberta para o cliente ID: ${id_cliente}. Saldo inicial: ${deposito_inicial}.`]
-        );
-
-        res.status(201).json({ message: 'Conta aberta com sucesso!', id_conta: accountId, numero_conta });
-
     } catch (error) {
-        console.error('Erro ao abrir conta:', error);
-        // Registrar falha na auditoria
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_funcionario_simulado, 'ABERTURA_CONTA', `Falha: Erro ao abrir conta para o cliente ID: ${id_cliente}. Detalhes: ${error.message}`]
-        );
-        res.status(500).json({ message: 'Erro interno do servidor ao abrir conta.' });
+        console.error('Erro na validação do OTP:', error);
+        res.status(500).json({ success: false, message: 'Erro interno do servidor' });
     }
 });
 
-// Tarefa 3.3: Operação de Depósito (Menu do Cliente)
+
+// =======================================================
+// ==                 ROTAS DE OPERAÇÕES BANCÁRIAS        ==
+// =======================================================
+
+// A lógica aqui muda: o backend apenas REGISTRA a transação. O TRIGGER no banco de dados ATUALIZA o saldo.
+
 app.post('/api/account/deposit', async (req, res) => {
     const { numero_conta, valor } = req.body;
-    const acao = 'DEPOSITO';
-    let id_usuario_cliente = null; // Será preenchido para auditoria
-
-    if (valor <= 0) {
-        return res.status(400).json({ message: 'O valor do depósito deve ser positivo.' });
-    }
-
-    const connection = await pool.getConnection(); // Obter uma conexão para a transação
     try {
-        await connection.beginTransaction(); // Iniciar transação
-
         const account = await AccountDAO.getAccountByNumber(numero_conta);
-
-        if (!account) {
-            throw new Error('Conta não encontrada.');
-        }
-
-        id_usuario_cliente = (await UserDAO.getUserById(account.id_cliente)).id_usuario; // Obter id_usuario do cliente
-
-        [cite_start]// Atualizar o saldo da conta [cite: 105, 109]
-        const novoSaldo = parseFloat(account.saldo) + parseFloat(valor);
-        const updated = await AccountDAO.updateAccountBalance(account.id_conta, novoSaldo);
-
-        if (!updated) {
-            throw new Error('Falha ao atualizar o saldo da conta.');
-        }
-
-        [cite_start]// Registrar o depósito na tabela de transações [cite: 105, 109]
-        await TransactionDAO.recordTransaction(account.id_conta, null, acao, valor, `Depósito na conta ${numero_conta}`);
-
-        // Registrar sucesso na auditoria
-        await connection.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario_cliente, acao, `Sucesso: Depósito de R$ ${valor} na conta ${numero_conta}. Novo saldo: R$ ${novoSaldo}.`]
-        );
-
-        await connection.commit(); // Confirmar transação
-        res.status(200).json({ message: 'Depósito realizado com sucesso!', novo_saldo: novoSaldo });
-
+        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
+        
+        // Apenas registra a transação. O gatilho 'atualizar_saldo' fará a soma no saldo.
+        await TransactionDAO.recordTransaction({
+            id_conta_origem: account.id_conta,
+            tipo_transacao: 'DEPOSITO',
+            valor: valor,
+            descricao: 'Depósito em conta'
+        });
+        
+        await recordAudit(account.id_cliente, 'deposito', `Depósito de R$${valor} na conta ${numero_conta}`);
+        res.json({ success: true, message: 'Depósito recebido com sucesso!' });
     } catch (error) {
-        await connection.rollback(); // Reverter transação em caso de erro
-        console.error('Erro ao realizar depósito:', error);
-        // Registrar falha na auditoria
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario_cliente, acao, `Falha: Erro ao depositar R$ ${valor} na conta ${numero_conta}. Detalhes: ${error.message}`]
-        );
-        res.status(500).json({ message: 'Erro interno do servidor ao depositar.', error: error.message });
-    } finally {
-        connection.release(); // Liberar a conexão
+        console.error('Erro no depósito:', error);
+        res.status(500).json({ success: false, message: error.message || 'Erro ao processar o depósito' });
     }
 });
 
-
-// Tarefa 3.4: Operação de Retirada (Menu do Cliente)
 app.post('/api/account/withdraw', async (req, res) => {
     const { numero_conta, valor } = req.body;
-    const acao = 'SAQUE';
-    let id_usuario_cliente = null; // Será preenchido para auditoria
-
-    if (valor <= 0) {
-        return res.status(400).json({ message: 'O valor do saque deve ser positivo.' });
-    }
-
-    const connection = await pool.getConnection(); // Obter uma conexão para a transação
     try {
-        await connection.beginTransaction(); // Iniciar transação
-
         const account = await AccountDAO.getAccountByNumber(numero_conta);
-
-        if (!account) {
-            throw new Error('Conta não encontrada.');
-        }
-
-        id_usuario_cliente = (await UserDAO.getUserById(account.id_cliente)).id_usuario; // Obter id_usuario do cliente
-
-        [cite_start]// Verificar se é suficiente saldo [cite: 106]
+        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
         if (parseFloat(account.saldo) < parseFloat(valor)) {
-            throw new Error('Saldo insuficiente para o saque.');
+            return res.status(400).json({ success: false, message: 'Saldo insuficiente.' });
         }
 
-        [cite_start]// Atualizar o saldo da conta [cite: 106, 109]
-        const novoSaldo = parseFloat(account.saldo) - parseFloat(valor);
-        const updated = await AccountDAO.updateAccountBalance(account.id_conta, novoSaldo);
+        // Apenas registra a transação. O gatilho 'atualizar_saldo' fará a subtração no saldo.
+        await TransactionDAO.recordTransaction({
+            id_conta_origem: account.id_conta,
+            tipo_transacao: 'SAQUE',
+            valor: valor,
+            descricao: 'Saque em conta'
+        });
 
-        if (!updated) {
-            throw new Error('Falha ao atualizar o saldo da conta.');
-        }
-
-        [cite_start]// Registrar a retirada na tabela de transações [cite: 106, 109]
-        await TransactionDAO.recordTransaction(account.id_conta, null, acao, valor, `Saque da conta ${numero_conta}`);
-
-        // Registrar sucesso na auditoria
-        await connection.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario_cliente, acao, `Sucesso: Saque de R$ ${valor} da conta ${numero_conta}. Novo saldo: R$ ${novoSaldo}.`]
-        );
-
-        await connection.commit(); // Confirmar transação
-        res.status(200).json({ message: 'Saque realizado com sucesso!', novo_saldo: novoSaldo });
-
+        await recordAudit(account.id_cliente, 'saque', `Saque de R$${valor} da conta ${numero_conta}`);
+        res.json({ success: true, message: 'Saque realizado com sucesso!' });
     } catch (error) {
-        await connection.rollback(); // Reverter transação em caso de erro
-        console.error('Erro ao realizar saque:', error);
-        // Registrar falha na auditoria
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario_cliente, acao, `Falha: Erro ao sacar R$ ${valor} da conta ${numero_conta}. Detalhes: ${error.message}`]
-        );
-        res.status(500).json({ message: 'Erro interno do servidor ao sacar.', error: error.message });
-    } finally {
-        connection.release(); // Liberar a conexão
+        console.error('Erro no saque:', error);
+        res.status(500).json({ success: false, message: error.message || 'Erro ao processar o saque' });
     }
 });
 
-// Tarefa 3.5: Consulta de Saldo (Menu do Cliente)
-app.get('/api/account/balance/:numero_conta', async (req, res) => {
-    const { numero_conta } = req.params;
-    let id_usuario_cliente = null; // Será preenchido para auditoria
-    const acao = 'CONSULTA_SALDO';
-
+app.post('/api/account/transfer', async (req, res) => {
+    const { numero_conta_origem, numero_conta_destino, valor } = req.body;
     try {
-        const account = await AccountDAO.getAccountByNumber(numero_conta);
+        const contaOrigem = await AccountDAO.getAccountByNumber(numero_conta_origem);
+        const contaDestino = await AccountDAO.getAccountByNumber(numero_conta_destino);
+        if (!contaOrigem || !contaDestino) return res.status(404).json({ success: false, message: 'Conta de origem ou destino não encontrada.' });
+        if (parseFloat(contaOrigem.saldo) < parseFloat(valor)) return res.status(400).json({ success: false, message: 'Saldo insuficiente' });
 
-        if (!account) {
-            throw new Error('Conta não encontrada.');
-        }
-        id_usuario_cliente = (await UserDAO.getUserById(account.id_cliente)).id_usuario; // Obter id_usuario do cliente
+        // Apenas registra a transação. O gatilho 'atualizar_saldo' fará a subtração na origem e a soma no destino.
+        await TransactionDAO.recordTransaction({
+            id_conta_origem: contaOrigem.id_conta,
+            id_conta_destino: contaDestino.id_conta,
+            tipo_transacao: 'TRANSFERENCIA',
+            valor: valor,
+            descricao: `Transferência para conta ${numero_conta_destino}`
+        });
 
-        // Registrar na auditoria
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario_cliente, acao, `Sucesso: Consulta de saldo para a conta ${numero_conta}. Saldo: R$ ${account.saldo}.`]
-        );
-
-        res.status(200).json({ numero_conta: account.numero_conta, saldo: account.saldo });
-
+        res.json({ success: true, message: 'Transferência realizada com sucesso!' });
     } catch (error) {
-        console.error('Erro ao consultar saldo:', error);
-        // Registrar falha na auditoria (se o usuário ou conta for desconhecido, id_usuario_cliente pode ser null)
-        await pool.execute(
-            'INSERT INTO auditoria (id_usuario, acao, detalhes) VALUES (?, ?, ?)',
-            [id_usuario_cliente, acao, `Falha: Erro ao consultar saldo da conta ${numero_conta}. Detalhes: ${error.message}`]
-        );
-        res.status(500).json({ message: 'Erro interno do servidor ao consultar saldo.', error: error.message });
+        console.error('Erro na transferência:', error);
+        res.status(500).json({ success: false, message: error.message || 'Erro ao processar a transferência.' });
+    }
+});
+
+// As rotas de consulta não precisam de grandes alterações
+app.get('/api/account/balance/:numero_conta', async (req, res) => {
+    try {
+        const account = await AccountDAO.getAccountByNumber(req.params.numero_conta);
+        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
+        res.json({ success: true, saldo: account.saldo });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Erro ao consultar saldo.' });
+    }
+});
+
+app.get('/api/account/statement/:numero_conta', async (req, res) => {
+    try {
+        const account = await AccountDAO.getAccountByNumber(req.params.numero_conta);
+        if (!account) return res.status(404).json({ success: false, message: 'Conta não encontrada' });
+        const statement = await TransactionDAO.getTransactionsByAccountId(account.id_conta);
+        res.json({ success: true, statement });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Erro ao consultar extrato.' });
+    }
+});
+
+// =======================================================
+// ==              ROTAS DE FUNCIONÁRIO                 ==
+// =======================================================
+
+// ... (rotas de CRUD de clientes que fizemos na Tarefa 1) ...
+
+// Rota para buscar as contas de um cliente específico
+app.get('/api/employee/clients/:clientId/accounts', async (req, res) => {
+    const { clientId } = req.params;
+    try {
+        const accounts = await AccountDAO.getAccountsByClientId(clientId);
+        res.json({ success: true, accounts });
+    } catch (error) {
+        console.error('Erro ao buscar contas do cliente:', error);
+        res.status(500).json({ success: false, message: 'Erro ao buscar contas.' });
+    }
+});
+
+// Rota para criar uma nova conta para um cliente
+app.post('/api/employee/clients/:clientId/accounts', async (req, res) => {
+    const { clientId } = req.params;
+    const { tipo_conta, id_agencia = 1 } = req.body; // id_agencia fixo por simplicidade
+    try {
+        const accountId = await AccountDAO.createAccount({ id_cliente: clientId, id_agencia, tipo_conta });
+        await recordAudit(null, 'criacao_conta', `Funcionário abriu a conta ${accountId} para o cliente ${clientId}`);
+        res.json({ success: true, message: 'Conta criada com sucesso!', accountId });
+    } catch (error) {
+        console.error('Erro ao criar conta:', error);
+        res.status(500).json({ success: false, message: 'Erro ao criar conta.' });
+    }
+});
+
+// Rota para atualizar o status de uma conta
+app.put('/api/employee/accounts/:accountId/status', async (req, res) => {
+    const { accountId } = req.params;
+    const { status } = req.body; // Espera 'ATIVA' ou 'BLOQUEADA'
+    try {
+        const affectedRows = await AccountDAO.updateAccountStatus(accountId, status);
+        if (affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Conta não encontrada.' });
+        }
+        await recordAudit(null, 'status_conta', `Funcionário alterou status da conta ${accountId} para ${status}`);
+        res.json({ success: true, message: `Status da conta atualizado para ${status}.` });
+    } catch (error) {
+        console.error('Erro ao atualizar status da conta:', error);
+        res.status(500).json({ success: false, message: 'Erro ao atualizar status.' });
+    }
+});
+
+// Rota para deletar uma conta
+app.delete('/api/employee/accounts/:accountId', async (req, res) => {
+    const { accountId } = req.params;
+    try {
+        const affectedRows = await AccountDAO.deleteAccount(accountId);
+        if (affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Conta não encontrada.' });
+        }
+        await recordAudit(null, 'delecao_conta', `Funcionário deletou a conta ${accountId}`);
+        res.json({ success: true, message: 'Conta deletada com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao deletar conta:', error);
+        res.status(400).json({ success: false, message: error.message || 'Erro ao deletar conta.' });
+    }
+});
+
+// Relatório de todas as contas com saldos e nomes dos clientes
+app.get('/api/reports/accounts-balances', async (req, res) => {
+    try {
+        const data = await ReportDAO.getAccountsWithBalances();
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error('Erro ao gerar relatório de contas e saldos:', error);
+        res.status(500).json({ success: false, message: 'Erro ao gerar relatório.' });
+    }
+});
+
+// Relatório de clientes por agência
+app.get('/api/reports/clients-by-agency/:agencyId', async (req, res) => {
+    const { agencyId } = req.params;
+    try {
+        const data = await ReportDAO.getClientsByAgency(agencyId);
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error('Erro ao gerar relatório de clientes por agência:', error);
+        res.status(500).json({ success: false, message: 'Erro ao gerar relatório.' });
+    }
+});
+
+// Relatório de logs de auditoria
+app.get('/api/reports/audit', async (req, res) => {
+    try {
+        const data = await ReportDAO.getAuditLogs();
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error('Erro ao gerar relatório de auditoria:', error);
+        res.status(500).json({ success: false, message: 'Erro ao gerar relatório.' });
     }
 });
 
 
-// Iniciar o servidor
-app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+app.listen(port, () => {
+    console.log(`Servidor do Banco Malvader rodando em http://localhost:${port}`);
 });

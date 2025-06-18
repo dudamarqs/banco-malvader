@@ -1,75 +1,39 @@
-const { pool } = require('../utils/database');
+const pool = require('../utils/database');
 
 class AccountDAO {
-    async openAccount(numero_conta, id_agencia, saldo, tipo_conta, id_cliente) {
-        const query = `
-            INSERT INTO conta (numero_conta, id_agencia, saldo, tipo_conta, id_cliente)
-            VALUES (?, ?, ?, ?, ?)
-        `;
-        const [result] = await pool.execute(query, [numero_conta, id_agencia, saldo, tipo_conta, id_cliente]);
-        return result.insertId;
-    }
-
-    // Método para abrir conta específica (CP, CC, CI)
-    async openSpecificAccount(id_conta, tipo_conta, details) {
-        let query = '';
-        let params = [id_conta];
-        if (tipo_conta === 'POUPANCA') {
-            query = `INSERT INTO conta_poupanca (id_conta, taxa_rendimento) VALUES (?, ?)`; 
-            params.push(details.taxa_rendimento);
-        } else if (tipo_conta === 'CORRENTE') {
-            query = `INSERT INTO conta_corrente (id_conta, limite, data_vencimento, taxa_manutencao) VALUES (?, ?, ?, ?)`;
-            params.push(details.limite, details.data_vencimento, details.taxa_manutencao);
-        } else if (tipo_conta === 'INVESTIMENTO') {
-            query = `INSERT INTO conta_investimento (id_conta, perfil_risco, valor_minimo, taxa_rendimento_base) VALUES (?, ?, ?, ?)`; 
-            params.push(details.perfil_risco, details.valor_minimo, details.taxa_rendimento_base);
-        } else {
-            throw new Error('Tipo de conta específico inválido.');
-        }
-        const [result] = await pool.execute(query, params);
-        return result.insertId;
-    }
-
-    async getAccountByNumber(numero_conta) {
-        const query = 'SELECT * FROM conta WHERE numero_conta = ?';
-        const [rows] = await pool.execute(query, [numero_conta]);
+    static async getAccountByNumber(numeroConta) {
+        const [rows] = await pool.query('SELECT * FROM conta WHERE numero_conta = ?', [numeroConta]);
         return rows[0];
     }
 
-    async getAccountsByClientId(id_cliente) {
-        const query = 'SELECT * FROM conta WHERE id_cliente = ?';
-        const [rows] = await pool.execute(query, [id_cliente]);
+    // As funções abaixo foram movidas para a Tarefa 2, mas as deixo aqui corrigidas
+    static async getAccountsByClientId(clientId) {
+        const [rows] = await pool.query('SELECT * FROM conta WHERE id_cliente = ?', [clientId]);
         return rows;
     }
 
-    async updateAccountBalance(id_conta, novo_saldo) {
-        const query = 'UPDATE conta SET saldo = ? WHERE id_conta = ?';
-        const [result] = await pool.execute(query, [novo_saldo, id_conta]);
-        return result.affectedRows > 0;
+    static async createAccount(accountData) {
+        const { id_cliente, id_agencia = 1, tipo_conta } = accountData; // id_agencia 1 como padrão
+        const numero_conta = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        const query = 'INSERT INTO conta (numero_conta, id_agencia, tipo_conta, id_cliente) VALUES (?, ?, ?, ?)';
+        const [result] = await pool.query(query, [numero_conta, id_agencia, tipo_conta, id_cliente]);
+        return result.insertId;
     }
 
-    async updateAccountStatus(id_conta, status) {
-        const query = 'UPDATE conta SET status = ? WHERE id_conta = ?';
-        const [result] = await pool.execute(query, [status, id_conta]);
-        return result.affectedRows > 0;
+    static async updateAccountStatus(accountId, status) {
+        const [result] = await pool.query('UPDATE conta SET status = ? WHERE id_conta = ?', [status, accountId]);
+        return result.affectedRows;
     }
-
-    async getAccountDetails(id_conta) {
-        const query = `
-            SELECT
-                c.*,
-                cp.taxa_rendimento, cp.ultimo_rendimento,
-                cc.limite, cc.data_vencimento, cc.taxa_manutencao,
-                ci.perfil_risco, ci.valor_minimo, ci.taxa_rendimento_base
-            FROM conta c
-            LEFT JOIN conta_poupanca cp ON c.id_conta = cp.id_conta
-            LEFT JOIN conta_corrente cc ON c.id_conta = cc.id_conta
-            LEFT JOIN conta_investimento ci ON c.id_conta = ci.id_conta
-            WHERE c.id_conta = ?;
-        `;
-        const [rows] = await pool.execute(query, [id_conta]);
-        return rows[0];
+    
+    static async deleteAccount(accountId) {
+        const [rows] = await pool.query('SELECT saldo FROM conta WHERE id_conta = ?', [accountId]);
+        if (rows.length > 0 && parseFloat(rows[0].saldo) !== 0) {
+            throw new Error('Não é possível excluir contas com saldo.');
+        }
+        const [result] = await pool.query('DELETE FROM conta WHERE id_conta = ?', [accountId]);
+        return result.affectedRows;
     }
 }
 
-module.exports = new AccountDAO();
+module.exports = AccountDAO;
